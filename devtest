@@ -1,12 +1,11 @@
 #!/bin/bash
-# Brendan Szymanski, bscubed@pm.me
-# A simple script to update maintained packages in the arch user repository,
-# check for errors, and if no errors occur, upload changes to the arch
-# user repository.
 
-exec 3>&1 2>&1
+# Brendan Szymanski, bscubed@pm.me
+# A simple tool to update maintained packages in the arch user repository, check
+# for errors, and if no errors occur, upload changes to the arch user repository
 
 TOOL_NAME=devtest
+VERSION=1.0.1
 CONFIG_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/$TOOL_NAME
 CONFIG_FILE=$CONFIG_DIR/config
 DATA_DIR=${XDG_DATA_HOME:-$HOME/.local/share}/$TOOL_NAME
@@ -34,7 +33,6 @@ UPLOAD_FAILED=()
 UPLOAD_SUCCESS=()
 BUILD_FAILED=()
 BUILD_SUCCESS=()
-DEPENDENCIES=("devtools" "ccache")
 
 setup() {
     if [ ! -d $CONFIG_DIR ]; then
@@ -46,50 +44,53 @@ setup() {
         log "Creating config file at $CONFIG_FILE"
 cat <<EOF > $CONFIG_FILE
 # Packages to build when the script is run without any options
-# Example: PACKAGES=("devtest" "yuzu-mainline-git" "citra-canary-git")
+# Example: PACKAGES=("package1" "package2" "package3")
 PACKAGES=()
 
 # Changes the default directory where PKGBUILDs are stored and built
-#PACKAGE_DIR=$PACKAGE_DIR
+PACKAGE_DIR=$PACKAGE_DIR
 
 # Changes the default directory where built packages are stored
-#OUTPUT_DIR=$OUTPUT_DIR
+OUTPUT_DIR=$OUTPUT_DIR
 
 # Changes the default directory where the Arch chroot is created
-#CHROOT_DIR=$CHROOT_DIR
+CHROOT_DIR=$CHROOT_DIR
 
 # pacman configuration file to be used by the Arch chroot. If this file does not exist,
 # /etc/pacman.conf will be used instead.
-# Any changes to this file will require you to delete the chroot directory so it can be rebuilt.
+# Any changes to this file will require you to rebuild the chroot with "devtest --rebuild"
 CUSTOM_PACMAN_CONF=$CUSTOM_PACMAN_CONF
 
 # makepkg configuration file to be used by the Arch chroot. If this file does not exist,
 # /etc/makepkg.conf will be used instead.
-# Any changes to this file will require you to delete the chroot directory so it can be rebuilt.
+# Any changes to this file will require you to rebuild the chroot with "devtest --rebuild"
 CUSTOM_MAKEPKG_CONF=$CUSTOM_MAKEPKG_CONF
 
-# Uncomment to enable ccache (requires ccache to be installed and configured)
+# Enable ccache (requires ccache to be installed and configured)
 # If ccache is not enabled in /etc/makepkg.conf or in CUSTOM_MAKEPKG_CONF
 # this will not work. https://wiki.archlinux.org/index.php/Ccache#Enable_ccache_for_makepkg
-#CCACHE_ENABLED=$CCACHE_ENABLED
+# Changes to this setting will require you to rebuild the chroot with "devtest --rebuild"
+CCACHE_ENABLED=$CCACHE_ENABLED
 
-# Uncomment this line if you'd like to store build cache in a custom directory
-#CCACHE_DIRECTORY=$CCACHE_DIRECTORY
+# Specifies the directory to store build cache if ccache is enabled.
+# Note: Not recommended if you build this package often locally.
+CCACHE_DIRECTORY=$CCACHE_DIRECTORY
 
-# Whether or not to clean build directories after successful builds
-#CLEAN=$CLEAN
+# Whether or not to clean build directories after successful builds.
+CLEAN=$CLEAN
 
 # If true, a prompt will appear after a successful build asking whether or not to upload
 # changes to the AUR.
 # NOTE: This option is only for AUR maintainers with correct SSH keys configured.
-#ASK_TO_UPLOAD=$ASK_TO_UPLOAD
+# https://wiki.archlinux.org/index.php/AUR_submission_guidelines#Authentication
+ASK_TO_UPLOAD=$ASK_TO_UPLOAD
 
 # If set to true, after a successful build a prompt will appear asking whether or not
 # to install the built package.
-#ASK_TO_INSTALL=$ASK_TO_INSTALL
+ASK_TO_INSTALL=$ASK_TO_INSTALL
 
-# If true, the script will not build any other packages after a build failure occurs.
-#EXIT_ON_FAILURE=$EXIT_ON_FAILURE
+# If true, no other packages will be built after a build failure occurs.
+EXIT_ON_FAILURE=$EXIT_ON_FAILURE
 EOF
     fi
     
@@ -109,10 +110,12 @@ EOF
 
 update_chroot() {
     if [ -d $CHROOT_DIR/root ]; then
-        echo "Updating arch chroot system in $CHROOT_DIR/" | tee /dev/fd/3
-        arch-nspawn $CHROOT_DIR/root pacman -Syu --noconfirm | tee /dev/fd/3
+        echo -ne "\033]0;Updating chroot...\007"
+        echo "Updating arch chroot system in $CHROOT_DIR/"
+        arch-nspawn $CHROOT_DIR/root pacman -Syu --noconfirm
     else
-        echo "Creating new arch chroot system in $CHROOT_DIR/" | tee /dev/fd/3
+        echo -ne "\033]0;Creating chroot...\007"
+        echo "Creating new arch chroot system in $CHROOT_DIR/"
         mkdir -p $CHROOT_DIR
         
         flags=()
@@ -131,11 +134,11 @@ update_chroot() {
             flags+=("-M $CUSTOM_MAKEPKG_CONF")
         fi
         
-        mkarchroot ${flags[*]} $CHROOT_DIR/root base base-devel linux | tee /dev/fd/3
+        mkarchroot ${flags[*]} $CHROOT_DIR/root base base-devel linux
         
         if $CCACHE_ENABLED; then
-            echo "Installing ccache on the chroot system" | tee /dev/fd/3
-            arch-nspawn $CHROOT_DIR/root pacman -S ccache --noconfirm | tee /dev/fd/3
+            echo "Installing ccache on the chroot system"
+            arch-nspawn $CHROOT_DIR/root pacman -S ccache --noconfirm
             if [ ! -d $CHROOT_DIR/ccache ]; then
                 log "Creating chroot ccache directory"
                 mkdir -p $CHROOT_DIR/ccache
@@ -146,14 +149,14 @@ update_chroot() {
 
 update_package() {
     if $CCACHE_ENABLED; then
-        makechrootpkg -c -d $CCACHE_DIRECTORY/:/ccache -r $CHROOT_DIR -- CCACHE_DIR=/ccache | tee /dev/fd/3
+        makechrootpkg -c -d $CCACHE_DIRECTORY/:/ccache -r $CHROOT_DIR -- CCACHE_DIR=/ccache
     else
-        makechrootpkg -c -r $CHROOT_DIR | tee /dev/fd/3
+        makechrootpkg -c -r $CHROOT_DIR
     fi
 }
 
 backup() {
-    log "Backing up `echo $1*.pkg.tar*` to $OUTPUT_DIR/$1/"
+    echo "Backing up `echo $1*.pkg.tar*` to $OUTPUT_DIR/$1/"
     mkdir -p $OUTPUT_DIR/$1
     mv -f $1*.pkg.tar* $OUTPUT_DIR/$1/
 }
@@ -166,14 +169,12 @@ upload() {
 }
 
 start() {
-    # Log stdout and stderr to a log file.
-    exec 3>&1 1>>$LOG_FILE 2>&1
-
     log "PACKAGES: ${PACKAGES[*]}"
 
     update_chroot
     for i in "${PACKAGES[@]}" ; do
-        echo "Building $i..." | tee /dev/fd/3
+        echo -ne "\033]0;Building $i...\007"
+        echo "Building $i..."
         
         # Download PKGBUILD if it doesn't exist
         if [[ ! -d $PACKAGE_DIR/$i ]] || [[ ! -f $PACKAGE_DIR/$i/PKGBUILD ]]; then
@@ -184,25 +185,27 @@ start() {
         cd $PACKAGE_DIR/$i
         if update_package ; then
             # Build successful!
-            echo "Package \"$i\" built successfully" | tee /dev/fd/3
+            echo "Package \"$i\" built successfully"
             BUILD_SUCCESS+=($i)
             
             if [[ $INSTALL == true ]]; then
-                sudo pacman -U --noconfirm $i*.pkg.tar* 1>&3
+                echo -ne "\033]0;Installing $i...\007"
+                sudo pacman -U --noconfirm $i*.pkg.tar*
             elif [[ $ASK_TO_INSTALL == true ]]; then
+                echo -ne "\033]0;Installing $i...\007"
                 while true; do
-                    printf "Would you like to install $i? [Y/n] " 1>&3
+                    printf "Would you like to install $i? [Y/n] "
                     read input
                     case $input in
                         y|Y|"" )
-                            sudo pacman -U --noconfirm $i*.pkg.tar* | tee /dev/fd/3
+                            sudo pacman -U --noconfirm $i*.pkg.tar*
                             break
                             ;;
                         n|N )
                             break
                             ;;
                         * )
-                            echo "Invalid input. Try again" | tee /dev/fd/3
+                            echo "Invalid input. Try again"
                     esac
                 done
             fi
@@ -217,7 +220,7 @@ start() {
             
             if $ASK_TO_UPLOAD ; then
                 while true; do
-                    printf "Upload package changes to the AUR? [y/N] " 1>&3
+                    printf "Upload package changes to the AUR? [y/N] "
                     read input
                     case $input in
                         n|N|"" )
@@ -229,19 +232,20 @@ start() {
                             break
                             ;;
                         * )
-                            echo "Invalid input. Try again" 1>&3;;
+                            echo "Invalid input. Try again";;
                     esac
                 done
             fi
             
             if $UPLOAD; then
+                echo -ne "\033]0;Updating $i PKGBUILD...\007"
                 # Prompt user for commit message
                 while true; do
-                    printf "Commit message: " 1>&3
+                    printf "Commit message: "
                     read input
                     case $input in
                         ""|" " )
-                            echo "Message cannot be blank. Please enter a valid commit message" 1>&3;;
+                            echo "Message cannot be blank. Please enter a valid commit message";;
                         * )
                             COMMIT_MESSAGE="$input"
                             break
@@ -251,16 +255,16 @@ start() {
                 
                 # Attempt to upload packages to the AUR
                 if upload $COMMIT_MESSAGE; then
-                    echo "Successfully uploaded $i." | tee /dev/fd/3
+                    echo "Successfully uploaded $i."
                     UPLOAD_SUCCESS+=($i)
                 else
-                    echo "Failed to upload package to AUR. Ensure the correct SSH keys are properly configured." | tee /dev/fd/3
-                    echo "See https://wiki.archlinux.org/index.php/AUR_submission_guidelines#Authentication for details." | tee /dev/fd/3
+                    echo "Failed to upload package to AUR. Ensure the correct SSH keys are properly configured."
+                    echo "See https://wiki.archlinux.org/index.php/AUR_submission_guidelines#Authentication for details."
                     UPLOAD_FAILED+=($i);
                 fi
             fi
         else
-            echo "Package build failed. See log at $LOG_FILE for details" | tee /dev/fd/3
+            echo "Package build failed. See log at $LOG_FILE for details"
             BUILD_FAILED+=($i);
             
             if $EXIT_ON_FAILURE; then
@@ -271,122 +275,104 @@ start() {
     done
     
     if [ ${#BUILD_SUCCESS[@]} -gt 0 ]; then
-        echo "The following packages were built successfully: ${BUILD_SUCCESS[*]}" | tee /dev/fd/3
+        echo "The following packages were built successfully: ${BUILD_SUCCESS[*]}"
     fi
     
     if [ ${#UPLOAD_SUCCESS[@]} -gt 0 ]; then
-        echo "The following packages were uploaded successfully: ${UPLOAD_SUCCESS[*]}" | tee /dev/fd/3
+        echo "The following packages were uploaded successfully: ${UPLOAD_SUCCESS[*]}"
     fi
     
     if [ ${#BUILD_FAILED[@]} -gt 0 ]; then
-        echo "The following packages failed to build: ${BUILD_FAILED[*]}" | tee /dev/fd/3
+        echo "The following packages failed to build: ${BUILD_FAILED[*]}"
     fi
     
     if [ ${#UPLOAD_FAILED[@]} -gt 0 ]; then
-        echo "The following packages failed to upload: ${UPLOAD_FAILED[*]}" | tee /dev/fd/3
+        echo "The following packages failed to upload: ${UPLOAD_FAILED[*]}"
     fi
 }
 
 log() {
-    echo $1 1>&2
+    if $VERBOSE ; then
+        echo $1
+    fi
+}
+
+show_help() {
+    echo "This tool helps manage, test, and update multiple AUR packages in a"
+    echo "project-like structure."
+    echo "All packages are built in a completely clean chroot environment to"
+    echo "test for errors and missing dependencies."
+    echo "If configured, this tool can also upload PKGBUILD changes to the AUR"
+    echo "automatically after a successful build."
+    echo
+    echo "The project directory directory is located in"
+    echo "$PACKAGE_DIR and packages downloaded from git"
+    echo "will be stored there."
+    echo
+    echo "Usage: $TOOL_NAME [options]"
+    echo "Usage: $TOOL_NAME [options] <package(s)>"
+    echo
+    echo "Options:"
+    echo "  -h, --help      Displays usage information"
+    echo "  -v, --version   Displays $TOOL_NAME version"
+    echo "  -V, --verbose   Runs in verbose output mode for debugging purposes"
+    echo "  -u, --upload    Upload package(s) to the AUR"
+    echo "  -i, --install   Install package(s) after a successful build"
+    echo "  -c, --clean     Clean build directories after successful build"
+    echo "  -R, --rebuild   Rebuild chroot system and exit"
+    echo
+}
+
+show_version() {
+    echo "$TOOL_NAME $VERSION"
 }
 
 setup
 
 packages=()
 
-while getopts ":m:p:hvucRri" opt; do
-    case ${opt} in
-        h )
-            echo "This scripts builds packages from the AUR in a clean sandboxed" 1>&3
-            echo "chroot to test for errors and missing dependencies." 1>&3
-            echo "After building packages, this script can optionally upload" 1>&3
-            echo "the updated PKGBUILD to the AUR automatically." 1>&3
-            echo 1>&3
-            echo "Usage: update-packages" 1>&3
-            echo "Usage: update-packages [options]" 1>&3
-            echo 1>&3
-            echo "Options:" 1>&3
-            echo "  -h             Prints usage information" 1>&3
-            echo "  -v             Runs in verbose output mode for debugging purposes" 1>&3
-            echo "  -u             Upload package(s) to the AUR" 1>&3
-            echo "  -i             Install package(s) after a successful build" 1>&3
-            echo "  -c             Clean build directories after successful build" 1>&3
-            echo "  -R             Rebuild chroot system and exit" 1>&3
-            echo "  -r             Rebuild chroot system and build packages" 1>&3
-            echo "  -m <message>   Commit message when git pushing to the AUR repo" 1>&3
-            echo "  -p <package>   Specific package to build" 1>&3
-            echo 1>&3
-            echo "If no arguments are provided, all packages will be built, but" 1>&3
-            echo "none will be uploaded" 1>&3
-            exit 0
-            ;;
-        u )
-            UPLOAD=true
-            ;;
-        v )
-            VERBOSE=true
-            ;;
-        c )
-            CLEAN=true
-            ;;
-        i )
-            INSTALL=true
-            ;;
-        R )
-            sudo rm -rf $CHROOT_DIR
-            update_chroot
-            exit 0
-            ;;
-        r )
-            sudo rm -rf $CHROOT_DIR
-            ;;
-        m )
-            COMMIT_MESSAGE="$OPTARG"
-            ;;
-        p )
-            packages+=("$OPTARG")
-            ;;
-        \? )
-            echo "Invalid option: $OPTARG" 1>&3
-            exit 1
-            ;;
-        : )
-            echo "Invalid option: $OPTARG requires an argument" 1>&3
-            exit 1
-            ;;
-    esac
-done
-shift $((OPTIND -1))
+options=$(getopt -o "hVucRiv" -l "help,verbose,upload,clean,rebuild,install,version" -a -- "$@")
 
-# If user specified packages to build, build those; otherwise build the default packages
-if [ ${#packages[@]} -gt 0 ]; then
-    PACKAGES=("${packages[@]}")
+# If getopt returns a non-zero code, exit the program.
+if [ $? -ne 0 ]; then
+    exit $?
 fi
 
+eval set -- "$options"
+
+while true; do
+    case $1 in
+        -h|--help)
+            show_help
+            exit 0 ;;
+        -v|--version)
+            show_version
+            exit 0 ;;
+        -u|--upload)
+            UPLOAD=true ;;
+        -i|--install)
+            INSTALL=true ;;
+        -V|--verbose)
+            VERBOSE=true ;;
+        -c|--clean)
+            CLEAN=true ;;
+        -R|--rebuild)
+            sudo rm -rf $CHROOT_DIR
+            update_chroot
+            exit 0 ;;
+        --)
+            shift
+            if [ $# -gt 0 ]; then
+                PACKAGES=("$@")
+            fi
+            break ;;
+    esac
+    shift
+done
+
 if [ ${#PACKAGES[@]} -eq 0 ]; then
-    echo "No packages specified. Please specify packages to build with the -p flag or save default packages in $CONFIG_FILE." 1>&3
+    echo "No packages specified. Please specify packages to build \"$TOOL_NAME <package(s)>\" or save default packages in $CONFIG_FILE."
     exit 1
 fi
 
-for i in "${DEPENDENCIES[@]}" ; do
-    if ! pacman -Qs $i > /dev/null ; then
-        while true; do
-            printf "Required dependency $i is not installed. Install it now? [Y/n] " 1>&3
-            read input
-            case $input in
-                n|N )
-                    exit
-                    ;;
-                y|Y|"" )
-                    sudo pacman -S $i --noconfirm
-                    break
-                    ;;
-                * )
-                    echo "Invalid input. Try again" 1>&3;;
-            esac
-        done
-    fi
-done
-
-start
+start 2>&1 | tee $LOG_FILE
